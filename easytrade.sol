@@ -2,7 +2,7 @@ pragma solidity 0.4.19;
 
 /*
 
-  Copyright 2017 EasyTrade.
+  Copyright 2018 EasyTrade.
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -159,7 +159,7 @@ contract EtherDelta {
 
 library EtherDeltaTrader {
 
-  address constant public ETHERDELTA_ADDR = 0x2937a786b0738cca385be085fb24964a0f003bbe; // EtherDelta contract address
+  address constant public ETHERDELTA_ADDR = 0x8d12a197cb00d4747a1fe03395095ce2a5cc6819; // EtherDelta contract address
   
   /// @dev Gets the address of EtherDelta contract
   /// @return Address of EtherDelta Contract.
@@ -307,6 +307,10 @@ library EtherDeltaTrader {
     bytes32 s
   ) internal returns(uint) {
       
+    //If expired return 0 
+    if(block.number > orderValues[2])
+      return 0;
+      
     //Fill EtherDelta Order
     uint availableVolume = EtherDelta(ETHERDELTA_ADDR).availableVolume(
       orderAddresses[2], 
@@ -380,10 +384,10 @@ library ZrxTrader {
     
   uint16 constant public EXTERNAL_QUERY_GAS_LIMIT = 4999;    // Changes to state require at least 5000 gas
 
-  address constant public ZRX_EXCHANGE_ADDR = 0x968e0c1839dd79ea06593d7050e95ffe830e54b3; // 0x Exchange contract address
-  address constant public TOKEN_TRANSFER_PROXY_ADDR = 0xc9cd4a0d0c8277ce95fc87994b1f21b86f5345ea; // TokenTransferProxy contract address
-  address constant public WETH_ADDR = 0x7b9489b4f1396fb41869e98b5d9f5dc1f746f051; // Wrapped ether address (WETH)
-  address constant public ZRX_TOKEN_ADDR = 0x37f25aa38b1f115520827567d076cc19ea307cfb;
+  address constant public ZRX_EXCHANGE_ADDR = 0x12459c951127e0c374ff9105dda097662a027093; // 0x Exchange contract address
+  address constant public TOKEN_TRANSFER_PROXY_ADDR = 0x8da0d80f5007ef1e431dd2127178d224e32c2ef4; // TokenTransferProxy contract address
+  address constant public WETH_ADDR = 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2; // Wrapped ether address (WETH)
+  address constant public ZRX_TOKEN_ADDR = 0xe41d2489571d322189246dafa5ebde1f4699f498;
   
   /// @dev Gets the address of the Wrapped Ether contract
   /// @return Address of Weth Contract.
@@ -490,7 +494,11 @@ library ZrxTrader {
     bytes32 r,
     bytes32 s
   ) internal returns(uint) {
-        
+      
+      //If expired return 0 
+      if(block.timestamp >= orderValues[4])
+        return 0;
+          
       bytes32 orderHash = Exchange(ZRX_EXCHANGE_ADDR).getOrderHash(orderAddresses, orderValues);
       
       uint unAvailable = Exchange(ZRX_EXCHANGE_ADDR).getUnavailableTakerTokenAmount(orderHash);
@@ -499,14 +507,14 @@ library ZrxTrader {
       uint availableByContract = SafeMath.safeSub(orderValues[1], unAvailable);
       
       //Gets the available amount according of the maker token balance
-      uint availableByBalance =getBalance(orderAddresses[2], orderAddresses[0]);
+      uint availableByBalance =  getPartialAmount(getBalance(orderAddresses[2], orderAddresses[0]), orderValues[0], orderValues[1]);
       
       //Gets the available amount according how much allowance of the token the maker has
-      uint availableByAllowance = getAllowance(orderAddresses[2], orderAddresses[0]);
+      uint availableByAllowance = getPartialAmount(getAllowance(orderAddresses[2], orderAddresses[0]), orderValues[0], orderValues[1]);
     
       //Get the available amount according to how much ZRX fee the maker can pay 
       uint zrxAmount = getAllowance(ZRX_TOKEN_ADDR, orderAddresses[0]);
-      uint availableByZRX = getPartialAmount(zrxAmount, orderValues[2], orderValues[0]);
+      uint availableByZRX = getPartialAmount(zrxAmount, orderValues[2], orderValues[1]);
       
       //Returns the min value of all available results
       return SafeMath.min256(SafeMath.min256(SafeMath.min256(availableByContract, availableByBalance), availableByAllowance), availableByZRX);
@@ -565,37 +573,18 @@ library ZrxTrader {
 contract EasyTrade {
     
   string constant public VERSION = "1.0.0";
-
+  address constant public ZRX_TOKEN_ADDR = 0xe41d2489571d322189246dafa5ebde1f4699f498;
+  
   address public admin; // Admin address
-  address public executor; // Account with permission to execute trades
   address public feeAccount; // Account that will receive the fee
   uint public serviceFee; // Percentage times (1 ether)
   uint public collectedFee = 0; // Total of fees accumulated
  
-  struct Request {
-    uint ethers; 
-    uint tokens; 
-    address depositAccount;
-    address refundAccount;
-  }
-
-  mapping (address => mapping (address => Request)) public buys; 
-  mapping (address => mapping (address => Request)) public sells; 
-  
-  event CreateBuyOrder(address account, address token, uint tokens, uint ethers, address depositAccount, address refundAccount);
-  event CreateSellOrder(address account, address token, uint tokens, uint ethers, address depositAccount, address refundAccount);
-  event CancelBuyOrder(address account, address token, uint amountGive);
-  event CancelSellOrder(address account, address token, uint amountGive);
-  event FillSellOrder(address account, address token, uint tokensSold, uint ethersObtained);
-  event FillBuyOrder(address account, address token, uint tokensObtained, uint ethersSpent);
+  event FillSellOrder(address account, address token, uint tokens, uint ethers, uint tokensSold, uint ethersObtained, uint tokensRefunded);
+  event FillBuyOrder(address account, address token, uint tokens, uint ethers, uint tokensObtained, uint ethersSpent, uint ethersRefunded);
   
   modifier onlyAdmin() {
     require(msg.sender == admin);
-    _;
-  }
-  
-  modifier onlyExecutor() {
-    require(msg.sender == executor);
     _;
   }
   
@@ -606,12 +595,10 @@ contract EasyTrade {
  
   function EasyTrade(
     address admin_,
-    address executor_,
     address feeAccount_,
     uint serviceFee_) 
   {
     admin = admin_;
-    executor = executor_;
     feeAccount = feeAccount_;
     serviceFee = serviceFee_;
   } 
@@ -628,12 +615,6 @@ contract EasyTrade {
     admin = admin_;
   }
   
-  /// @dev Set the new admin. Only admin can set the new executor.
-  /// @param executor_ Address of the account with permissions to execute.
-  function changeExecutor(address executor_) public onlyAdmin {
-    executor = executor_;
-  }
-  
   /// @dev Set the new fee account. Only admin can set the new fee account.
   /// @param feeAccount_ Address of the new fee account.
   function changeFeeAccount(address feeAccount_) public onlyAdmin {
@@ -647,100 +628,43 @@ contract EasyTrade {
     serviceFee = serviceFee_;
   }
   
-  /// @dev Creates or updates an order to sell a token. 
+  /// @dev Creates an order to sell a token. 
   /// @notice Needs first to call Token(tokend_address).approve(this, tokens_) so the contract can trade the tokens.
-  /// @param token_ Address of the token to buy.
-  /// @param tokens_ Amount of the token to sell.
-  /// @param ethers_ Amount of ethers to get.
-  /// @param depositAccount_ Address to where transfer the ethers obtained.
-  /// @param refundAccount_ Address to where return the tokens not sold.
-  function createSellOrder(
-    address token_, 
-    uint tokens_, 
-    uint ethers_,
-    address depositAccount_,
-    address refundAccount_
-  ) public
-  {
-    //There should not be a previous sell order
-    require(sells[token_][msg.sender].tokens == 0);
-    
-    //Make sure tokens have been allowed to transfer and sell
-    require(Token(token_).allowance(msg.sender, this) >= tokens_);
-    
-    //Saves the amount of ethers to give and the amount of tokens to get
-    sells[token_][msg.sender] = Request({
-      tokens: SafeMath.safeAdd(sells[token_][msg.sender].tokens, tokens_),
-      ethers: ethers_,
-      depositAccount: depositAccount_,
-      refundAccount: refundAccount_
-    });
-    
-    CreateSellOrder(msg.sender, token_, tokens_, ethers_, depositAccount_, refundAccount_);
-  }
-  
-  /// @dev Creates or updates an order to buy a token.
-  /// @param token_ Address of the token to buy.
-  /// @param tokens_ Amount of the token to buy.
-  /// @param depositAccount_ Address to where transfer the tokens obtained.
-  /// @param refundAccount_ Address to where return the ethers not spent.
-  function createBuyOrder(
-    address token_, 
-    uint tokens_,
-    address depositAccount_,
-    address refundAccount_
-  ) public payable 
-  {
-     
-    //There should not be a previous buy order
-    require(buys[token_][msg.sender].ethers == 0);
-      
-    //Saves the amount of ethers to give and the amount of tokens to get
-    buys[token_][msg.sender] = Request({
-      ethers: SafeMath.safeAdd(buys[token_][msg.sender].ethers, msg.value),
-      tokens: tokens_,
-      depositAccount: depositAccount_,
-      refundAccount: refundAccount_
-    });
-    
-    CreateBuyOrder(msg.sender, token_, tokens_, msg.value, depositAccount_, refundAccount_);
-  }
-  
-  /// @dev Fills sell orders by synchronously executing exchange buy orders.
-  /// @param account Address of the account of the sell order.
-  /// @param token Address of the token of the sell order.
-  /// @param isEtherDelta Array of booleans with true if the order is from EtherDelta, false if it is from 0x.
+  /// @param token Address of the token to sell.
+  /// @param tokensTotal Amount of the token to sell.
+  /// @param ethersTotal Amount of ethers to get.
+  /// @param exchanges Exchanges of each order (0: EtherDelta 1: 0x).
+  /// @param ethersTotal Amount of ethers to get.
   /// @param orderAddresses Array of address arrays containing individual order addresses.
   /// @param orderValues Array of uint arrays containing individual order values.
-  /// @param exchangeFees Array of exchange fee percentages to fill in orders.
+  /// @param exchangeFees Array of exchange fees to fill in orders.
   /// @param v Array ECDSA signature v parameters.
   /// @param r Array of ECDSA signature r parameters.
   /// @param s Array of ECDSA signature s parameters.
-  function executeSellRequest(
-    address account,
-    address token,
-    bool[] isEtherDelta,
+  function createSellOrder(
+    address token, 
+    uint tokensTotal, 
+    uint ethersTotal,
+    uint8[] exchanges,
     address[5][] orderAddresses,
     uint[6][] orderValues,
     uint[] exchangeFees,
     uint8[] v,
     bytes32[] r,
     bytes32[] s
-  ) public onlyExecutor
+  ) public
   {
     
-    Request sell = sells[token][account];
-    uint ethersTotal = sell.ethers;
-    uint tokensTotal = sell.tokens;
+    //Transfer tokens to contract so it can sell them.
+    require(Token(token).transferFrom(msg.sender, this, tokensTotal));
+    
     uint ethersObtained;
     uint tokensSold;
-    
-    //Transfer tokens to contract so it can sell them.
-    require(Token(token).transferFrom(account, this, sell.tokens));
+    uint tokensRefunded = tokensTotal;
     
     (ethersObtained, tokensSold) = fillOrdersForSellRequest(
       tokensTotal,
-      isEtherDelta,
+      exchanges,
       orderAddresses,
       orderValues,
       exchangeFees,
@@ -749,34 +673,38 @@ contract EasyTrade {
       s
     );
     
+    //We make sure that at least one order had some amount filled
+    require(ethersObtained > 0 && tokensSold >0);
+    
     //Check that the price of what was sold is not smaller than the min agreed
     require(SafeMath.safeDiv(ethersTotal, tokensTotal) <= SafeMath.safeDiv(ethersObtained, tokensSold));
     
     //Substracts the tokens sold
-    sell.tokens = SafeMath.safeSub(tokensTotal, tokensSold);
+    tokensRefunded = SafeMath.safeSub(tokensTotal, tokensSold);
     
     //Return tokens not sold 
-    closeSellOrder(token, account);
+    if(tokensRefunded > 0) 
+     require(Token(token).transfer(msg.sender, tokensRefunded));
     
     //Send the ethersObtained
-    transfer(sell.depositAccount, ethersObtained);
+    transfer(msg.sender, ethersObtained);
     
-    FillSellOrder(account, token, tokensSold, ethersObtained);
+    FillSellOrder(msg.sender, token, tokensTotal, ethersTotal, tokensSold, ethersObtained, tokensRefunded);
   }
   
   /// @dev Fills a sell order by synchronously executing exchange buy orders.
   /// @param tokensTotal Total amount of tokens to sell.
-  /// @param isEtherDelta Array of booleans with true if the order is from EtherDelta, false if it is from 0x.
+  /// @param exchanges Exchanges of each order (0: EtherDelta 1: 0x).
   /// @param orderAddresses Array of address arrays containing individual order addresses.
   /// @param orderValues Array of uint arrays containing individual order values.
-  /// @param exchangeFees Array of exchange fee percentages to fill in orders.
+  /// @param exchangeFees Array of exchange fees to fill in orders.
   /// @param v Array ECDSA signature v parameters.
   /// @param r Array of ECDSA signature r parameters.
   /// @param s Array of ECDSA signature s parameters.
-  /// @return Total of ethers obtained.
+  /// @return Total amount of ethers obtained and total amount of tokens sold.
   function fillOrdersForSellRequest(
     uint tokensTotal,
-    bool[] isEtherDelta,
+    uint8[] exchanges,
     address[5][] orderAddresses,
     uint[6][] orderValues,
     uint[] exchangeFees,
@@ -793,7 +721,7 @@ contract EasyTrade {
       (totalEthersObtained, tokensRemaining) = fillOrderForSellRequest(
          totalEthersObtained,
          tokensRemaining,
-         isEtherDelta[i],
+         exchanges[i],
          orderAddresses[i],
          orderValues[i],
          exchangeFees[i],
@@ -805,17 +733,30 @@ contract EasyTrade {
     }
     
     //Substracts service fee
-    uint fee = SafeMath.safeMul(totalEthersObtained, serviceFee) / (1 ether);
-    totalEthersObtained = collectServiceFee(fee, totalEthersObtained);
+    if(totalEthersObtained > 0) {
+      uint fee =  SafeMath.safeMul(totalEthersObtained, serviceFee) / (1 ether);
+      totalEthersObtained = collectServiceFee(SafeMath.min256(fee, totalEthersObtained), totalEthersObtained);
+    }
     
     //Returns ethers obtained
     return (totalEthersObtained, SafeMath.safeSub(tokensTotal, tokensRemaining));
   }
   
+  /// @dev Fills a sell order with a buy order.
+  /// @param totalEthersObtained Total amount of ethers obtained so far.
+  /// @param initialTokensRemaining Total amount of tokens remaining to sell.
+  /// @param exchange 0: EtherDelta 1: 0x.
+  /// @param orderAddresses Array of address arrays containing individual order addresses.
+  /// @param orderValues Array of uint arrays containing individual order values.
+  /// @param exchangeFee Exchange fees to fill the order.
+  /// @param v Array ECDSA signature v parameters.
+  /// @param r Array of ECDSA signature r parameters.
+  /// @param s Array of ECDSA signature s parameters.
+  /// @return Total amount of ethers obtained and total amount of tokens remainint to sell.
   function fillOrderForSellRequest(
     uint totalEthersObtained,
     uint initialTokensRemaining,
-    bool isEtherDelta,
+    uint8 exchange,
     address[5] orderAddresses,
     uint[6] orderValues,
     uint exchangeFee,
@@ -833,7 +774,7 @@ contract EasyTrade {
     //Checks that there is enoughh amount to execute the trade
     uint fillAmount = getFillAmount(
       tokensRemaining,
-      isEtherDelta,
+      exchange,
       orderAddresses,
       orderValues,
       exchangeFee,
@@ -847,7 +788,7 @@ contract EasyTrade {
       //Substracts the amount to execute
       tokensRemaining = SafeMath.safeSub(tokensRemaining, fillAmount);
     
-      if(isEtherDelta) {
+      if(exchange == 0) {
         //Executes EtherDelta buy order and returns the amount of ethers obtained, fullfill all or returns zero
         ethersObtained = EtherDeltaTrader.fillBuyOrder(
           orderAddresses,
@@ -882,38 +823,40 @@ contract EasyTrade {
    
   }
   
-  /// @dev Fills a buy orders by synchronously executing exchange sell orders.
-  /// @param account Address of the account of the buy order.
-  /// @param token Address of the token of the buy order.
-  /// @param isEtherDelta Array of booleans with true if the order is from EtherDelta, false if it is from 0x.
+  /// @dev Creates an order to buy a token. 
+  /// @param token Address of the token to sell.
+  /// @param tokensTotal Amount of the token to sell.
+  /// @param exchanges Exchanges of each order (0: EtherDelta 1: 0x).
   /// @param orderAddresses Array of address arrays containing individual order addresses.
   /// @param orderValues Array of uint arrays containing individual order values.
-  /// @param exchangeFees Array of exchange fee percentages to fill in orders.
+  /// @param exchangeFees Array of exchange fees to fill in orders.
   /// @param v Array ECDSA signature v parameters.
   /// @param r Array of ECDSA signature r parameters.
   /// @param s Array of ECDSA signature s parameters.
-  function executeBuyRequest(
-    address account,
-    address token,
-    bool[] isEtherDelta,
+  function createBuyOrder(
+    address token, 
+    uint tokensTotal,
+    uint8[] exchanges,
     address[5][] orderAddresses,
     uint[6][] orderValues,
     uint[] exchangeFees,
     uint8[] v,
     bytes32[] r,
     bytes32[] s
-  ) public onlyExecutor
+  ) public payable 
   {
     
-    Request buy = buys[token][account];
-    uint ethersTotal = buy.ethers;
-    uint tokensTotal = buy.tokens;
+    
+    uint ethersTotal = msg.value;
     uint tokensObtained;
     uint ethersSpent;
+    uint ethersRefunded = ethersTotal;
+     
+    require(tokensTotal > 0 && msg.value > 0);
     
     (tokensObtained, ethersSpent) = fillOrdersForBuyRequest(
       ethersTotal,
-      isEtherDelta,
+      exchanges,
       orderAddresses,
       orderValues,
       exchangeFees,
@@ -922,25 +865,28 @@ contract EasyTrade {
       s
     );
     
-    //Check that the price of what was sold is not smaller than the min agreed
+    //We make sure that at least one order had some amount filled
+    require(ethersSpent > 0 && tokensObtained >0);
+    
+    //Check that the price of what was bought is not greater than the max agreed
     require(SafeMath.safeDiv(ethersTotal, tokensTotal) >= SafeMath.safeDiv(ethersSpent, tokensObtained));
 
     //Substracts the ethers spent
-    buy.ethers = SafeMath.safeSub(ethersTotal, ethersSpent);
+    ethersRefunded = SafeMath.safeSub(ethersTotal, ethersSpent);
+    
+    //Return ethers not spent 
+    if(ethersRefunded > 0)
+     require(msg.sender.call.value(ethersRefunded)());
    
-    //Return tokens not sold 
-    closeBuyOrder(token, account);
-   
-    //Send the ethersObtained
-    transferToken(token, buy.depositAccount, tokensObtained);
-   
-    FillBuyOrder(account, token, tokensObtained, ethersSpent);
+    //Send the tokens
+    transferToken(token, msg.sender, tokensObtained);
+    
+    FillBuyOrder(msg.sender, token, tokensTotal, ethersTotal, tokensObtained, ethersSpent, ethersRefunded);
   }
-  
   
   /// @dev Fills a buy order by synchronously executing exchange sell orders.
   /// @param ethersTotal Total amount of ethers to spend.
-  /// @param isEtherDelta Array of booleans with true if the order is from EtherDelta, false if it is from 0x.
+  /// @param exchanges Exchanges of each order (0: EtherDelta 1: 0x).
   /// @param orderAddresses Array of address arrays containing individual order addresses.
   /// @param orderValues Array of uint arrays containing individual order values.
   /// @param exchangeFees Array of exchange fees to fill in orders.
@@ -948,9 +894,10 @@ contract EasyTrade {
   /// @param r Array of ECDSA signature r parameters.
   /// @param s Array of ECDSA signature s parameters.
   /// @return Total of tokens obtained.
+  /// @return Total amount of tokens obtained and total amount of ethers spent.
   function fillOrdersForBuyRequest(
     uint ethersTotal,
-    bool[] isEtherDelta,
+    uint8[] exchanges,
     address[5][] orderAddresses,
     uint[6][] orderValues,
     uint[] exchangeFees,
@@ -961,13 +908,14 @@ contract EasyTrade {
   {
     uint totalTokensObtained = 0;
     uint ethersRemaining = ethersTotal;
+    
     for (uint i = 0; i < orderAddresses.length; i++) {
     
       if(ethersRemaining > 0) {
         (totalTokensObtained, ethersRemaining) = fillOrderForBuyRequest(
           totalTokensObtained,
           ethersRemaining,
-          isEtherDelta[i],
+          exchanges[i],
           orderAddresses[i],
           orderValues[i],
           exchangeFees[i],
@@ -983,11 +931,22 @@ contract EasyTrade {
     return (totalTokensObtained, SafeMath.safeSub(ethersTotal, ethersRemaining));
   }
   
-  
+  /// @dev Fills a buy order wtih a sell order.
+  /// @param totalTokensObtained Total amount of tokens obtained so far.
+  /// @param initialEthersRemaining Total amount of ethers remainint to spend.
+  /// @param exchange 0: EtherDelta 1: 0x.
+  /// @param orderAddresses Array of address arrays containing individual order addresses.
+  /// @param orderValues Array of uint arrays containing individual order values.
+  /// @param exchangeFee Exchange fees to fill the order.
+  /// @param v Array ECDSA signature v parameters.
+  /// @param r Array of ECDSA signature r parameters.
+  /// @param s Array of ECDSA signature s parameters.
+  /// @return Total of tokens obtained.
+  /// @return Total amount of tokens obtained and total amount of ethers remainint to spend.
   function fillOrderForBuyRequest(
     uint totalTokensObtained,
     uint initialEthersRemaining,
-    bool isEtherDelta,
+    uint8 exchange,
     address[5] orderAddresses,
     uint[6] orderValues,
     uint exchangeFee,
@@ -1005,7 +964,7 @@ contract EasyTrade {
     //Checks that there is enoughh amount to execute the trade
     uint fillAmount = getFillAmount(
       ethersRemaining,
-      isEtherDelta,
+      exchange,
       orderAddresses,
       orderValues,
       exchangeFee,
@@ -1022,7 +981,7 @@ contract EasyTrade {
       //Substract service fee
       (fillAmount, ethersRemaining) = substractFee(serviceFee, fillAmount, ethersRemaining);
          
-      if(isEtherDelta) {
+      if(exchange == 0) {
         //Executes EtherDelta order, fee is paid directly to EtherDelta, fullfill all or returns zero
         tokensObtained = EtherDeltaTrader.fillSellOrder(
           orderAddresses,
@@ -1059,7 +1018,7 @@ contract EasyTrade {
   
   /// @dev Get the amount to fill in the order.
   /// @param amount Remaining amount of the order.
-  /// @param isEtherDelta True if the order is from EtherDelta, false if it is from 0x.
+  /// @param exchange 0: EtherDelta 1: 0x.
   /// @param orderAddresses Array of address arrays containing individual order addresses.
   /// @param orderValues Array of uint arrays containing individual order values.
   /// @param v Array ECDSA signature v parameters.
@@ -1068,7 +1027,7 @@ contract EasyTrade {
   /// @return Min amount between the remaining and the order available.
   function getFillAmount(
     uint amount,
-    bool isEtherDelta,
+    uint8 exchange,
     address[5] orderAddresses,
     uint[6] orderValues,
     uint exchangeFee,
@@ -1078,7 +1037,7 @@ contract EasyTrade {
   ) internal returns(uint) 
   {
     uint availableAmount;
-    if(isEtherDelta) {
+    if(exchange == 0) {
       availableAmount = EtherDeltaTrader.getAvailableAmount(
         orderAddresses,
         orderValues,
@@ -1105,7 +1064,7 @@ contract EasyTrade {
   /// @param feePercentage Fee Percentage
   /// @param fillAmount Amount to fill the order
   /// @param ethersRemaining Remaining amount of ethers for other orders
-  /// @return Amount to fill the order and remainin amount
+  /// @return Amount to fill the order and remaining amount
   function substractFee(
     uint feePercentage,
     uint fillAmount,
@@ -1146,55 +1105,6 @@ contract EasyTrade {
   function transferToken(address token, address account, uint amount) internal {
     require(Token(token).transfer(account, amount));
   }
-  
-  /// @dev Cancel a buy 
-  /// @param token Address of token to buy.
-  /// @param account Address of account that created the buy order.
-  function cancelBuyOrder(address token, address account) public {
-    require(msg.sender == admin || msg.sender == account);
-    require(buys[token][account].ethers > 0);
-    uint amount = closeBuyOrder(token, account);
-    CancelBuyOrder(account, token, amount);
-  } 
-  
-  /// @dev Cancel a sell order
-  /// @param token Address of token to sell.
-  /// @param account Address of account that created the sell order.
-  function cancelSellOrder(address token, address account) public {
-    require(msg.sender == admin || msg.sender == account);
-    require(sells[token][account].tokens > 0);
-    uint amount = closeSellOrder(token, account);
-    CancelSellOrder(account, token, amount);
-    
-  }
-  
-  /// @dev Cancel buy order.
-  /// @param token Address of token to buy.
-  /// @param account Address of account that created the buy order.
-  /// @return Amount cancelled.
-  function closeBuyOrder(address token, address account) internal returns(uint) {
-    Request buy = buys[token][account];
-    uint remaining = buy.ethers;
-    buy.ethers = 0;
-    buy.tokens = 0;
-    if(remaining > 0)
-     require(buy.refundAccount.call.value(remaining)());
-    return remaining;
-  } 
-  
-  /// @dev Cancel sell order.
-  /// @param token Address of token to sell.
-  /// @param account Address of account that created the sell order.
-  /// @return Amount cancelled.
-  function closeSellOrder(address token, address account) internal returns(uint) {
-    Request sell = sells[token][account];
-    uint remaining = sell.tokens;
-    sell.ethers = 0;
-    sell.tokens = 0;
-    if(remaining > 0)
-      require(Token(token).transferFrom(account, account, remaining));
-    return remaining;
-  }
    
   /// @dev Withdraw collected service fees. Only by fee account.
   /// @param amount Amount to withdraw
@@ -1202,5 +1112,12 @@ contract EasyTrade {
     require(collectedFee >= amount);
     collectedFee = SafeMath.safeSub(collectedFee, amount);
     require(feeAccount.send(amount));
+  }
+  
+   
+  /// @dev Withdraw contract ZRX in case new version is deployed. Only by admin.
+  /// @param amount Amount to withdraw
+  function withdrawZRX(uint amount) public onlyAdmin {
+    require(Token(ZRX_TOKEN_ADDR).transfer(admin, amount));
   }
 }
